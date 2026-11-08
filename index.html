@@ -269,6 +269,7 @@ let lang = detectLang();
 let T = I18N[lang];
 let clockTimer = null, searchTimer = null, searchSeq = 0, showSeq = 0;
 let current = [], activeIdx = -1;
+let lastQuery = "";      // 产生当前城市的输入文字
 let selected = null;        // 当前城市
 let lastWeather = null;     // 当前天气数据（切换语言时重绘用）
 
@@ -328,14 +329,37 @@ function presetToCity(p) {
 
 // 切换语言时，按 id 用新语言重新取城市名
 async function relabelCity(city) {
-  let c = city;
+  show(await localize(city), true);
+}
+
+// 把城市名换成当前界面语言（按 id 重新查）
+async function localize(city) {
+  if (!city || !city.id || city._lang === lang) return city;
   try {
-    if (city.id) {
-      const r = await fetch(`https://geocoding-api.open-meteo.com/v1/get?id=${city.id}&language=${lang}`);
-      if (r.ok) { const d = await r.json(); if (d && d.name) c = d; }
-    }
+    const r = await fetch(`https://geocoding-api.open-meteo.com/v1/get?id=${city.id}&language=${lang}`);
+    if (r.ok) { const d = await r.json(); if (d && d.name) return { ...d, _lang: lang }; }
   } catch {}
-  show(c, true);
+  return city;
+}
+
+// Open-Meteo 只匹配所选语言的地名，所以按输入文字判断语言，查不到再换语言重试
+async function geoSearch(q) {
+  const hasKana = /[\u3040-\u30ff]/.test(q);
+  const hasHan = /[\u3400-\u9fff]/.test(q);
+  const hasHangul = /[\uac00-\ud7af]/.test(q);
+  let order;
+  if (hasKana) order = ["ja", "zh", "en"];
+  else if (hasHangul) order = ["ko", lang, "en"];
+  else if (hasHan) order = lang === "ja" ? ["ja", "zh", "en"] : ["zh", "ja", "en"];
+  else order = [lang, "en", "zh", "ja"];
+  order = [...new Set(order)];
+  for (const l of order) {
+    const r = await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=8&language=${l}&format=json`);
+    if (!r.ok) continue;
+    const data = await r.json();
+    if (data.results && data.results.length) return data.results.map((c) => ({ ...c, _lang: l }));
+  }
+  return [];
 }
 
 // ---------- 搜索 ----------
@@ -361,12 +385,10 @@ document.addEventListener("click", (e) => {
 
 async function search(q) {
   const seq = ++searchSeq;
-  const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=8&language=${lang}&format=json`;
   try {
-    const r = await fetch(url);
-    const data = await r.json();
+    const res = await geoSearch(q);
     if (seq !== searchSeq) return;
-    current = data.results || [];
+    current = res;
     renderResults();
   } catch {
     if (seq !== searchSeq) return;
@@ -395,12 +417,13 @@ function setActive(i) {
   items.forEach((el, k) => el.classList.toggle("active", k === activeIdx));
   items[activeIdx].scrollIntoView({ block: "nearest" });
 }
-function pick(i) {
+async function pick(i) {
   const c = current[i];
   if (!c) return;
   hideResults();
-  input.value = c.name;
-  show(c);
+  lastQuery = input.value.trim();
+  input.blur();
+  show(await localize(c));
 }
 function hideResults() { list.classList.remove("show"); }
 
@@ -415,16 +438,15 @@ async function refresh() {
   const q = input.value.trim();
   goBtn.disabled = true; goBtn.classList.add("spin");
   try {
-    if (q && (!selected || q !== selected.name)) {
+    if (q && (!selected || (q !== selected.name && q !== lastQuery))) {
       const seq = ++searchSeq;
-      const r = await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=8&language=${lang}&format=json`);
-      const data = await r.json();
+      const res = await geoSearch(q);
       if (seq !== searchSeq) return;
-      const res = data.results || [];
       if (!res.length) { current = []; renderResults(); return; }
       hideResults();
       input.blur();
-      await show(res[0], false, true);
+      lastQuery = q;
+      await show(await localize(res[0]), false, true);
     } else if (selected) {
       hideResults();
       input.blur();
