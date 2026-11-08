@@ -47,7 +47,18 @@
   .lang button.on { background: var(--accent); color: #fff; }
 
   .search { position: relative; }
+  .search-row { display: flex; gap: 8px; }
+  .go {
+    flex-shrink: 0; display: flex; align-items: center; gap: 6px;
+    border: 0; border-radius: 12px; padding: 0 16px;
+    background: var(--accent); color: #fff; font-size: 1rem; font-weight: 600; cursor: pointer;
+  }
+  .go:disabled { opacity: .7; cursor: default; }
+  .go svg { width: 18px; height: 18px; }
+  .go.spin svg { animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
   .search input {
+    flex: 1; min-width: 0;
     width: 100%;
     font-size: 1.05rem;
     padding: 14px 16px;
@@ -127,7 +138,13 @@
   </div>
 
   <div class="search">
-    <input id="q" type="search" autocomplete="off">
+    <div class="search-row">
+      <input id="q" type="search" enterkeyhint="search" autocomplete="off">
+      <button id="go" class="go" type="button">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+        <span id="t-go"></span>
+      </button>
+    </div>
     <ul id="results" class="results"></ul>
   </div>
 
@@ -155,7 +172,7 @@ const I18N = {
     diff: (ahead, h) => `比你的时间${ahead ? "快" : "慢"} ${h}`,
     hours: (h, m) => m ? `${h} 小时 ${m} 分钟` : `${h} 小时`,
     feels: "体感", humidity: "湿度", wind: "风速", rain: "今日降水概率",
-    today: "今天", sep: "，",
+    today: "今天", sep: "，", go: "刷新",
   },
   en: {
     htmlLang: "en", locale: "en-US",
@@ -171,7 +188,7 @@ const I18N = {
     diff: (ahead, h) => `${h} ${ahead ? "ahead of" : "behind"} you`,
     hours: (h, m) => [h ? `${h} h` : "", m ? `${m} min` : ""].filter(Boolean).join(" "),
     feels: "Feels like", humidity: "Humidity", wind: "Wind", rain: "Rain chance today",
-    today: "Today", sep: ", ",
+    today: "Today", sep: ", ", go: "Refresh",
   },
   ja: {
     htmlLang: "ja", locale: "ja-JP",
@@ -187,7 +204,7 @@ const I18N = {
     diff: (ahead, h) => `あなたより ${h} ${ahead ? "進んでいます" : "遅れています"}`,
     hours: (h, m) => m ? `${h}時間${m}分` : `${h}時間`,
     feels: "体感", humidity: "湿度", wind: "風速", rain: "今日の降水確率",
-    today: "今日", sep: "、",
+    today: "今日", sep: "、", go: "更新",
   },
 };
 
@@ -280,6 +297,7 @@ function setLang(l) {
   $("t-sub").textContent = T.sub;
   $("t-src").textContent = T.src;
   input.placeholder = T.placeholder;
+  $("t-go").textContent = T.go;
   document.querySelectorAll("#lang button").forEach((b) => b.classList.toggle("on", b.dataset.l === l));
   renderChips();
   hideResults();
@@ -328,7 +346,10 @@ input.addEventListener("input", () => {
   searchTimer = setTimeout(() => search(q), 300);
 });
 input.addEventListener("keydown", (e) => {
-  if (!list.classList.contains("show")) return;
+  if (!list.classList.contains("show")) {
+    if (e.key === "Enter") { e.preventDefault(); refresh(); }
+    return;
+  }
   if (e.key === "ArrowDown") { e.preventDefault(); setActive(activeIdx + 1); }
   else if (e.key === "ArrowUp") { e.preventDefault(); setActive(activeIdx - 1); }
   else if (e.key === "Enter") { e.preventDefault(); pick(activeIdx >= 0 ? activeIdx : 0); }
@@ -383,8 +404,42 @@ function pick(i) {
 }
 function hideResults() { list.classList.remove("show"); }
 
+// ---------- 刷新按钮 ----------
+// 输入框里是新城市 → 搜索并显示第一个结果；否则 → 重新获取当前城市的天气
+const goBtn = $("go");
+goBtn.onclick = () => refresh();
+
+async function refresh() {
+  if (goBtn.disabled) return;
+  clearTimeout(searchTimer);
+  const q = input.value.trim();
+  goBtn.disabled = true; goBtn.classList.add("spin");
+  try {
+    if (q && (!selected || q !== selected.name)) {
+      const seq = ++searchSeq;
+      const r = await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=8&language=${lang}&format=json`);
+      const data = await r.json();
+      if (seq !== searchSeq) return;
+      const res = data.results || [];
+      if (!res.length) { current = []; renderResults(); return; }
+      hideResults();
+      input.blur();
+      await show(res[0], false, true);
+    } else if (selected) {
+      hideResults();
+      input.blur();
+      await show(selected.preset || selected, false, true);
+    }
+  } catch {
+    list.innerHTML = `<li class="err">${T.searchFail}</li>`;
+    list.classList.add("show");
+  } finally {
+    goBtn.disabled = false; goBtn.classList.remove("spin");
+  }
+}
+
 // ---------- 显示城市 ----------
-async function show(cityOrPreset, keepWeather = false) {
+async function show(cityOrPreset, keepWeather = false, force = false) {
   const city = cityOrPreset.n ? presetToCity(cityOrPreset) : cityOrPreset;
   const sameCity = selected && selected.latitude === city.latitude && selected.longitude === city.longitude;
   selected = city;
@@ -431,7 +486,7 @@ async function show(cityOrPreset, keepWeather = false) {
   clockTimer = setInterval(tick, 1000);
 
   // 只是切换语言且天气已有 → 直接重绘，不再请求
-  if ((keepWeather || sameCity) && lastWeather && lastWeather.lat === city.latitude && lastWeather.lon === city.longitude) {
+  if (!force && (keepWeather || sameCity) && lastWeather && lastWeather.lat === city.latitude && lastWeather.lon === city.longitude) {
     renderWeather(lastWeather.data);
     return;
   }
